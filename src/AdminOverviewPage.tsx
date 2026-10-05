@@ -1,5 +1,14 @@
 import { useEffect, useState } from 'react';
-import { Users, ClipboardList, Award, TrendingUp, UserCheck, FileText, BarChart3 } from 'lucide-react';
+import { 
+  Users, 
+  ClipboardList, 
+  Award, 
+  TrendingUp, 
+  UserCheck, 
+  FileText, 
+  BarChart, 
+  Printer 
+} from 'lucide-react';
 import { EVALUATION_FORMS, getRatingColor } from '@/forms';
 import { getAllUsers, getEvidenceByUser, getEvaluationsByUser } from '@/db';
 import type { User, Evidence, Evaluation } from '@/types';
@@ -8,164 +17,312 @@ import { toast } from '@/components/ui/Toast';
 
 export function AdminOverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
   const [employees, setEmployees] = useState<User[]>([]);
-  const [evidenceCounts, setEvidenceCounts] = useState<Record<string, Evidence[]>>({});
-  const [evaluations, setEvaluations] = useState<Record<string, Evaluation[]>>({});
+  const [evidenceCounts, setEvidenceCounts] = useState<Record<string, number>>({});
+  const [evaluations, setEvaluations] = useState<Record<string, Evaluation>>({});
   const [loading, setLoading] = useState(true);
+
+  // حالة التحكم بنافذة طباعة استمارة المعلم
+  const [selectedForPrint, setSelectedForPrint] = useState<{ emp: User; evalData?: Evaluation } | null>(null);
 
   useEffect(() => {
     (async () => {
       setLoading(true);
       try {
         const users = await getAllUsers();
-        const emp = users.filter((u) => u.role === 'employee');
-        setEmployees(emp);
-        const rows = await Promise.all(emp.map(async (u) => ({ id: u.id, evidence: await getEvidenceByUser(u.id), evaluations: await getEvaluationsByUser(u.id) })));
-        const evMap: Record<string, Evidence[]> = {};
-        const evalMap: Record<string, Evaluation[]> = {};
-        rows.forEach((row) => { evMap[row.id] = row.evidence; evalMap[row.id] = row.evaluations; });
-        setEvidenceCounts(evMap); setEvaluations(evalMap);
-      } catch (error) {
-        toast('error', error instanceof Error ? error.message : 'تعذر مزامنة لوحة المعلومات');
-      } finally { setLoading(false); }
+        const staff = users.filter(u => u.role !== 'admin');
+        setEmployees(staff);
+
+        const evCounts: Record<string, number> = {};
+        const evals: Record<string, Evaluation> = {};
+
+        await Promise.all(
+          staff.map(async (emp) => {
+            const [userEvs, userEvals] = await Promise.all([
+              getEvidenceByUser(emp.id),
+              getEvaluationsByUser(emp.id)
+            ]);
+            evCounts[emp.id] = userEvs.length;
+            if (userEvals && userEvals.length > 0) {
+              evals[emp.id] = userEvals[0];
+            }
+          })
+        );
+
+        setEvidenceCounts(evCounts);
+        setEvaluations(evals);
+      } catch (err) {
+        toast.error('حدث خطأ أثناء تحميل بيانات لوحة القيادة');
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
-  const totalEmployees = employees.length;
-  const totalEvidence = Object.values(evidenceCounts).reduce((acc, arr) => acc + arr.length, 0);
-  const approvedCount = Object.values(evaluations).reduce(
-    (acc, arr) => acc + arr.filter((e) => e.status === 'approved').length, 0
-  );
+  // دالة تصدير تقرير التقييمات الشامل بصيغة Excel (CSV)
+  const handleExportCSV = () => {
+    if (!employees.length) {
+      toast.error('لا توجد بيانات معلمين لتصديرها');
+      return;
+    }
+    const headers = ['رقم السجل المدني', 'اسم المعلم / الموظف', 'المسمى الوظيفي', 'عدد الشواهد', 'المجموع الكلي', 'التقدير'];
+    const rows = employees.map(emp => {
+      const ev = evaluations[emp.id];
+      const count = evidenceCounts[emp.id] || 0;
+      return [
+        emp.civil_id || emp.national_id || '',
+        emp.full_name || emp.name || '',
+        emp.job_title || 'معلم',
+        count,
+        ev ? `${ev.total_score || 0}%` : 'غير مقيّم',
+        ev?.rating_label || 'قيد الرصد'
+      ];
+    });
 
-  const avgProgress = employees.length > 0
-    ? employees.reduce((acc, emp) => {
-        if (!emp.formType) return acc;
-        const form = EVALUATION_FORMS[emp.formType];
-        const ev = evidenceCounts[emp.id] || [];
-        const uploaded = new Set(ev.map((e) => e.criterionId)).size;
-        return acc + (uploaded / form.criteria.length) * 100;
-      }, 0) / employees.length
+    const csvContent = '\uFEFF' + [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `تقرير_تقييمات_المعلمين_${new Date().toLocaleDateString('ar-SA')}.csv`;
+    link.click();
+    toast.success('تم تصدير كشف التقرير بنجاح');
+  };
+
+  const totalEvaluated = Object.keys(evaluations).length;
+  const avgScore = totalEvaluated > 0
+    ? Math.round(
+        Object.values(evaluations).reduce((acc, curr) => acc + (curr.total_score || 0), 0) / totalEvaluated
+      )
     : 0;
 
-  const stats = [
-    { label: 'إجمالي الموظفين', value: totalEmployees.toString(), icon: Users, bg: 'bg-secondary-50', iconColor: 'text-secondary-600' },
-    { label: 'إجمالي الشواهد', value: totalEvidence.toString(), icon: FileText, bg: 'bg-primary-50', iconColor: 'text-primary-600' },
-    { label: 'تقييمات معتمدة', value: approvedCount.toString(), icon: Award, bg: 'bg-success-50', iconColor: 'text-success-600' },
-    { label: 'متوسط الإنجاز', value: `${avgProgress.toFixed(0)}%`, icon: TrendingUp, bg: 'bg-accent-50', iconColor: 'text-accent-600' },
-  ];
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[300px]">
+        <div className="text-gray-500 text-sm">جاري تحميل لوحة الإدارة...</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      {loading && <div className="rounded-xl border border-primary-100 bg-primary-50 px-4 py-3 text-center text-sm text-primary-700">جاري المزامنة مع Supabase...</div>}
-      {/* Welcome banner */}
-      <div className="overflow-hidden rounded-2xl bg-gradient-to-bl from-secondary-700 via-secondary-600 to-primary-600 p-6 text-white shadow-elevated">
-        <h3 className="text-xl font-bold">لوحة معلومات المدير</h3>
-        <p className="mt-1 text-sm opacity-90">نظرة عامة على أداء الكادر وتقدم التقييمات</p>
+    <div className="space-y-6 dir-rtl text-right">
+      {/* ترويسة الصفحة مع زر تصدير التقرير */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-gray-200">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-800">لوحة المتابعة والتقارير</h1>
+          <p className="text-sm text-gray-500 mt-1">نظرة عامة على أداء المعلمين ونسب الإنجاز في التقييمات</p>
+        </div>
+        <button
+          onClick={handleExportCSV}
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition shadow-sm"
+        >
+          <FileText className="w-4 h-4" />
+          تصدير كشف التقييمات (Excel)
+        </button>
       </div>
 
-      {/* Stats cards */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map((stat) => {
-          const Icon = stat.icon;
-          return (
-            <div key={stat.label} className="card">
-              <div className={`mb-3 inline-flex rounded-xl ${stat.bg} p-2.5`}>
-                <Icon size={22} className={stat.iconColor} />
-              </div>
-              <p className="text-2xl font-bold text-neutral-800">{stat.value}</p>
-              <p className="text-xs text-neutral-500">{stat.label}</p>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Staff overview table */}
-      <div className="card">
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-base font-bold text-neutral-800">تقدّم الموظفين</h3>
-          <button
-            onClick={() => onNavigate('staff')}
-            className="btn-ghost text-primary-600"
-          >
-            <Users size={16} />
-            إدارة الكادر
-          </button>
+      {/* بطاقات الإحصائيات السريعة */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm flex items-center justify-between">
+          <div>
+            <p className="text-xs text-gray-500 font-medium">إجمالي المعلمين المقيّمين</p>
+            <p className="text-2xl font-bold text-gray-800 mt-1">{totalEvaluated} / {employees.length}</p>
+          </div>
+          <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
+            <Users className="w-6 h-6" />
+          </div>
         </div>
 
-        {employees.length === 0 ? (
-          <div className="flex flex-col items-center py-8 text-center">
-            <Users size={28} className="mb-2 text-neutral-400" />
-            <p className="text-sm text-neutral-500">لا يوجد موظفون بعد</p>
-            <button onClick={() => onNavigate('staff')} className="btn-primary mt-3">
-              إضافة موظف جديد
-            </button>
+        <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm flex items-center justify-between">
+          <div>
+            <p className="text-xs text-gray-500 font-medium">متوسط درجات الأداء</p>
+            <p className="text-2xl font-bold text-emerald-600 mt-1">{avgScore}%</p>
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-neutral-200 text-right text-xs text-neutral-500">
-                  <th className="pb-3 pr-2 font-bold">الاسم</th>
-                  <th className="hidden pb-3 px-2 font-bold md:table-cell">النموذج</th>
-                  <th className="hidden pb-3 px-2 font-bold sm:table-cell">الشواهد</th>
-                  <th className="hidden pb-3 px-2 font-bold lg:table-cell">نسبة الإنجاز</th>
-                  <th className="hidden pb-3 px-2 font-bold sm:table-cell">التقييم</th>
-                  <th className="pb-3 pl-2 font-bold">إجراء</th>
-                </tr>
-              </thead>
-              <tbody>
-                {employees.map((emp) => {
-                  const form = emp.formType ? EVALUATION_FORMS[emp.formType] : null;
-                  const ev = evidenceCounts[emp.id] || [];
-                  const evals = evaluations[emp.id] || [];
-                  const uploaded = form ? new Set(ev.map((e) => e.criterionId)).size : 0;
-                  const progress = form ? (uploaded / form.criteria.length) * 100 : 0;
-                  const approvedEval = evals.find((e) => e.status === 'approved');
+          <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
+            <TrendingUp className="w-6 h-6" />
+          </div>
+        </div>
 
-                  return (
-                    <tr key={emp.id} className="border-b border-neutral-100 last:border-0 hover:bg-neutral-50">
-                      <td className="py-3 pr-2">
-                        <div className="flex items-center gap-2">
-                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-secondary-100 text-xs font-bold text-secondary-700">
-                            {emp.fullName.charAt(0)}
-                          </div>
-                          <div>
-                            <p className="font-bold text-neutral-800">{emp.fullName}</p>
-                            <p className="text-xs text-neutral-500">{emp.civilId}</p>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="hidden px-2 text-xs text-neutral-600 md:table-cell">{form?.shortName || '—'}</td>
-                      <td className="hidden px-2 text-xs text-neutral-600 sm:table-cell">{ev.length}</td>
-                      <td className="hidden px-2 lg:table-cell">
-                        <ProgressBar value={progress} size="sm" showValue={false} />
-                        <span className="mt-1 block text-xs text-neutral-500">{progress.toFixed(0)}%</span>
-                      </td>
-                      <td className="hidden px-2 sm:table-cell">
-                        {approvedEval ? (
-                          <span className={`font-bold ${getRatingColor(approvedEval.totalScore)}`}>
-                            {approvedEval.totalScore.toFixed(1)}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-neutral-400">—</span>
-                        )}
-                      </td>
-                      <td className="py-3 pl-2">
+        <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm flex items-center justify-between">
+          <div>
+            <p className="text-xs text-gray-500 font-medium">نسبة إنجاز التقييمات</p>
+            <p className="text-2xl font-bold text-indigo-600 mt-1">
+              {employees.length > 0 ? Math.round((totalEvaluated / employees.length) * 100) : 0}%
+            </p>
+          </div>
+          <div className="p-3 bg-indigo-50 text-indigo-600 rounded-xl">
+            <Award className="w-6 h-6" />
+          </div>
+        </div>
+      </div>
+
+      {/* جدول كشف المعلمين مع أزرار الإجراءات والطباعة */}
+      <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+          <h2 className="font-bold text-gray-800 text-base">سجل أداء المعلمين</h2>
+          <span className="text-xs text-gray-500">{employees.length} معلم وموظف</span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-right text-sm">
+            <thead className="bg-gray-50 border-b border-gray-100 text-gray-600 text-xs">
+              <tr>
+                <th className="p-3.5">المعلم</th>
+                <th className="p-3.5 text-center">السجل المدني</th>
+                <th className="p-3.5 text-center">الشواهد المرفوعة</th>
+                <th className="p-3.5 text-center">المجموع</th>
+                <th className="p-3.5 text-center">التقدير</th>
+                <th className="p-3.5 text-center">الإجراءات</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {employees.map((emp) => {
+                const ev = evaluations[emp.id];
+                const count = evidenceCounts[emp.id] || 0;
+                return (
+                  <tr key={emp.id} className="hover:bg-gray-50/70 transition">
+                    <td className="p-3.5">
+                      <div className="font-medium text-gray-900">{emp.full_name || emp.name}</div>
+                      <div className="text-xs text-gray-500">{emp.job_title || 'معلم'}</div>
+                    </td>
+                    <td className="p-3.5 text-center font-mono text-xs text-gray-600">
+                      {emp.civil_id || emp.national_id || '-'}
+                    </td>
+                    <td className="p-3.5 text-center">
+                      <span className="inline-block px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
+                        {count} شاهد
+                      </span>
+                    </td>
+                    <td className="p-3.5 text-center font-bold text-emerald-600">
+                      {ev ? `${ev.total_score || 0}%` : '-'}
+                    </td>
+                    <td className="p-3.5 text-center">
+                      <span className="inline-block px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700">
+                        {ev?.rating_label || 'قيد الرصد'}
+                      </span>
+                    </td>
+                    <td className="p-3.5 text-center">
+                      <div className="flex items-center justify-center gap-2">
                         <button
-                          onClick={() => onNavigate('evaluation')}
-                          className="btn-ghost text-xs text-primary-600"
+                          onClick={() => setSelectedForPrint({ emp, evalData: ev })}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition"
+                          title="طباعة استمارة التقييم الرسمية"
                         >
-                          <ClipboardList size={14} />
-                          تقييم
+                          <Printer className="w-3.5 h-3.5" />
+                          طباعة الاستمارة
                         </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* نافذة معاينة الاستمارة الرسمية للطباعة (A4 / PDF) */}
+      {selectedForPrint && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto">
+          <div className="bg-white text-gray-900 rounded-xl shadow-2xl max-w-4xl w-full p-6 relative print:p-0 print:m-0 print:shadow-none print:w-full">
+            {/* شريط الإغلاق وأمر الطباعة - يختفي تلقائياً عند الطباعة */}
+            <div className="flex justify-between items-center mb-6 pb-3 border-b border-gray-200 print:hidden">
+              <h2 className="text-lg font-bold text-gray-800">معاينة استمارة التقييم الرسمية</h2>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => window.print()}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-1.5"
+                >
+                  <Printer className="w-4 h-4" />
+                  طباعة / حفظ كـ PDF
+                </button>
+                <button
+                  onClick={() => setSelectedForPrint(null)}
+                  className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium transition"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </div>
+
+            {/* الاستمارة الرسمية المجهزة بمقاس A4 */}
+            <div id="official-print-modal" className="font-sans text-right dir-rtl leading-relaxed p-4 border border-gray-300 rounded-lg print:border-none print:p-0">
+              <div className="border-b-2 border-gray-900 pb-3 mb-4 flex justify-between items-center text-xs">
+                <div>
+                  <p className="font-bold">المملكة العربية السعودية</p>
+                  <p>وزارة التعليم</p>
+                  <p>الإدارة العامة للتعليم</p>
+                </div>
+                <div className="text-center">
+                  <h1 className="text-base font-black underline mb-1">استمارة تقييم الأداء الوظيفي</h1>
+                  <p className="text-gray-600">العام الدراسي: 1448هـ</p>
+                </div>
+                <div className="text-left text-gray-500">
+                  <p>تاريخ الطباعة: {new Date().toLocaleDateString('ar-SA')}</p>
+                </div>
+              </div>
+
+              {/* بيانات المعلم */}
+              <div className="grid grid-cols-3 gap-2 bg-gray-50 border border-gray-300 rounded p-2.5 mb-4 text-xs">
+                <p><strong>اسم الموظف:</strong> {selectedForPrint.emp.full_name || selectedForPrint.emp.name}</p>
+                <p><strong>السجل المدني:</strong> {selectedForPrint.emp.civil_id || selectedForPrint.emp.national_id}</p>
+                <p><strong>المسمى الوظيفي:</strong> {selectedForPrint.emp.job_title || 'معلم'}</p>
+              </div>
+
+              {/* جدول الدرجات والمعايير */}
+              <table className="w-full border-collapse border border-gray-400 text-xs mb-4">
+                <thead>
+                  <tr className="bg-gray-100">
+                    <th className="border border-gray-400 p-2 text-center w-10">#</th>
+                    <th className="border border-gray-400 p-2 text-right">معيار التقييم</th>
+                    <th className="border border-gray-400 p-2 text-center w-24">الدرجة المستحقة</th>
+                    <th className="border border-gray-400 p-2 text-center w-24">الدرجة المرصودة</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(selectedForPrint.evalData?.scores && (selectedForPrint.evalData.scores as any[]).length > 0) ? (
+                    (selectedForPrint.evalData.scores as any[]).map((sc: any, idx: number) => (
+                      <tr key={idx}>
+                        <td className="border border-gray-400 p-2 text-center">{idx + 1}</td>
+                        <td className="border border-gray-400 p-2">{sc.criterion_title || sc.criterion || `المعيار ${idx + 1}`}</td>
+                        <td className="border border-gray-400 p-2 text-center">{sc.max_score || 25}</td>
+                        <td className="border border-gray-400 p-2 text-center font-bold text-emerald-700">{sc.score}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="border border-gray-400 p-4 text-center text-gray-500">
+                        {selectedForPrint.evalData ? 'التقييم مرصود بالمجموع الإجمالي' : 'لم يتم رصد التقييم لهذا المعلم حتى الآن'}
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-gray-100 font-bold">
+                    <td colSpan={2} className="border border-gray-400 p-2 text-left pl-4">النتيجة النهائية والتقدير:</td>
+                    <td className="border border-gray-400 p-2 text-center text-emerald-800 text-sm">
+                      {selectedForPrint.evalData?.total_score ? `${selectedForPrint.evalData.total_score}%` : '-'}
+                    </td>
+                    <td className="border border-gray-400 p-2 text-center">
+                      {selectedForPrint.evalData?.rating_label || 'قيد الرصد'}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+
+              {/* خانة التوقيعات والاعتماد */}
+              <div className="grid grid-cols-2 gap-8 pt-6 mt-4 border-t border-gray-300 text-center text-xs">
+                <div>
+                  <p className="font-bold mb-6">توقيع المعلم بالعلم</p>
+                  <p>التوقيع: ........................................</p>
+                </div>
+                <div>
+                  <p className="font-bold mb-6">مدير المدرسة (الاعتماد والختم)</p>
+                  <p>التوقيع: ........................................</p>
+                </div>
+              </div>
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
